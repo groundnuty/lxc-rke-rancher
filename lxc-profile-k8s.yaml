@@ -1,11 +1,9 @@
-# lxc.mount.entry line from https://forum.proxmox.com/threads/kubernetes-sharing-of-dev-kmsg-with-the-container.61622/
 config:
-  linux.kernel_modules: bridge,br_netfilter,ip_tables,ip6_tables,ip_vs,netlink_diag,nf_nat,overlay,xt_conntrack
+  linux.kernel_modules: ip_vs,ip_vs_rr,ip_vs_wrr,ip_vs_sh,ip_tables,ip6_tables,netlink_diag,nf_nat,overlay,br_netfilter
   raw.lxc: |-
     lxc.apparmor.profile = unconfined
     lxc.cgroup.devices.allow = a
     lxc.mount.auto=proc:rw sys:rw
-    lxc.mount.entry = /dev/kmsg dev/kmsg none defaults,bind,create=file 0 0
     lxc.cap.drop =
   security.nesting: "true"
   security.privileged: "true"
@@ -19,4 +17,9 @@ devices:
     path: /
     pool: default
     type: disk
-name: default
+name: k8s
+devices:
+  aadisable1:
+    path: /dev/kmsg
+    source: /dev/kmsg
+    type: unix-char

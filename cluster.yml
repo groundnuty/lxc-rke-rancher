@@ -1,12 +1,7 @@
-ignore_docker_version: true
-ssh_key_path: ~/.ssh/id_rsa
-network:
-  plugin: canal
-  # plugin: flannel
-  # flannel on lxc has problems
-system_images:
-        # kubernetes: rancher/hyperkube:v1.13.5-rancher1
-        kubernetes: rancher/hyperkube:v1.17.5-rancher1
+cluster_name: rke-orzech
+kubernetes_version: v1.23.7-rancher1-1
+# all tools images for that version: https://github.com/rancher/kontainer-driver-metadata/blob/master/rke/k8s_rke_system_images.go
+
 nodes:
   - address: rke1
     user: ubuntu
@@ -17,8 +12,81 @@ nodes:
   - address: rke3
     user: ubuntu
     role: [controlplane,worker,etcd]
+
+ssh_key_path: ~/.ssh/id_rsa
+ignore_docker_version: true
+enable_cri_dockerd: true
+
+#! authentication:
+#!   strategy: x509
+#!   sans:
+#!     - "10.88.37.85"
+#!     - "10.88.37.196"
+#!     - "10.88.37.250"
+#!     - "10.87.23.29"
+#!     - "rke1"
+#!     - "rke2"
+#!     - "rke3"
+
+network:
+  plugin: calico
+
+dns:
+  provider: coredns
+  upstreamnameservers:
+  - 1.1.1.1
+  - 8.8.4.4
+  nodelocal:
+    ip_address: "169.254.20.10"
+
 services:
   etcd:
     snapshot: true
     creation: 6h
     retention: 24h
+
+  kube-api:
+    # Enable audit logging
+    # Available as of v1.0.0
+    audit_log:
+      enabled: false
+
+    # Enable AlwaysPullImages Admission controller plugin
+    # Available as of v0.2.0
+    always_pull_images: false
+    extra_args:
+      # Increase number of delete workers. Speed up namespace cleanup
+      delete-collection-workers: 3
+
+  kube-controller:
+    # CIDR pool used to assign IP addresses to pods in the cluster
+    cluster_cidr: 10.42.0.0/16
+    # IP range for any services created on Kubernetes
+    # This must match the service_cluster_ip_range in kube-api
+    service_cluster_ip_range: 10.43.0.0/16
+    # Add additional arguments to the kubernetes API server
+    # This WILL OVERRIDE any existing defaults
+    #! extra_args:
+    #!   # Enable RotateKubeletServerCertificate feature gate
+    #!   feature-gates: RotateKubeletServerCertificate=true
+    #!   cluster-signing-duration: 87600h # 10 years, give take leap years
+
+  kubelet:
+    # Base domain for the cluster
+    cluster_domain: cluster.local
+    # IP address for the DNS service endpoint
+    cluster_dns_server: 10.43.0.10
+    # Fail if swap is on
+    fail_swap_on: false
+    extra_args:
+      cgroup-driver: systemd
+      # Set max pods to (default 110)
+      max-pods: 100
+      # Enable RotateKubeletServerCertificate feature gate
+      #! feature-gates: RotateKubeletServerCertificate=true
+      #! rotate-certificates: true
+      #! rotate-server-certificates: true
+      # Disable volume calculations
+      volume-stats-agg-period: 0
+
+

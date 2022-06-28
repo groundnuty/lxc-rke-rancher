@@ -1,55 +1,122 @@
 #!/bin/bash
-mkdir -p /home/ubuntu/.config/lxc/
-sudo chown -R ubuntu:ubuntu /home/ubuntu/.config
-lxd init --preseed < lxd-init.yaml
-#sudo lxc delete rke1 rke2 rke3 --force
-NODES=$(echo rke{1..3})
-ssh-keygen -b 2048 -t rsa -f /home/ubuntu/.ssh/id_rsa -q -N ""
-SSH_PUBKEY="/home/ubuntu/.ssh/id_rsa.pub"
 
-LXC_IMAGE="ubuntu:bionic"
-sudo lxc profile edit default < lxc-profile-default.yaml
-sudo lxc profile create docker
-sudo lxc profile edit docker < lxc-profile-docker.yaml
-LXC_PROFILES="--profile default --profile docker"
+export CLUSTER_NAME=rke
+export LXC_IMAGE="images:ubuntu/22.04"
+export LXC_PROFILES="--profile k8s --profile docker"
 
-# Create containers
-for NODE in ${NODES}; do lxc launch ${LXC_PROFILES} ${LXC_IMAGE} ${NODE} ; done
+export DOCKER_VERSION=20.10.17
+# The versions of runc and containerd that come with every docker version
+# can be found here: https://github.com/moby/moby/tree/master/hack/dockerfile/install
 
-# Wait a few seconds for nodes to be up
-sleep 20
+function init_host(){
+	mkdir -p /home/ubuntu/.config/lxc/
+	sudo chown -R ubuntu:ubuntu /home/ubuntu/.config
+	sudo mkdir -p /mnt/volume/lxd/storage-pools/default
+	lxd init --preseed < lxd-init.yaml
+	ssh-keygen -b 2048 -t rsa -f /home/ubuntu/.ssh/id_rsa -q -N "" <<<"y" >/dev/null
+	SSH_PUBKEY="/home/ubuntu/.ssh/id_rsa.pub"
 
-# Push ssh keys
-for NODE in ${NODES}; do lxc file push ${SSH_PUBKEY} ${NODE}/home/ubuntu/.ssh/authorized_keys --mode 0700 ; done
+	# shellcheck disable=SC2024
+	sudo lxc profile create k8s
+	sudo lxc profile edit k8s < lxc-profile-k8s.yaml
+	sudo lxc profile create docker
+	# shellcheck disable=SC2024
+	sudo lxc profile edit docker < lxc-profile-docker.yaml
+}
 
-# Install Docker
-for NODE in ${NODES}; do
-	# lxc exec ${NODE} -- bash -c 'curl -L get.docker.com | bash'
-    lxc exec ${NODE} -- bash -c 'curl https://releases.rancher.com/install-docker/18.06.sh | sh'
-	# don't use docker 19.03 for now, it doesn't work at least on lxc
-	# lxc exec ${NODE} -- bash -c 'sudo apt install docker.io -y'
-	# Add ubuntu user to docker group
-	lxc exec ${NODE} -- sudo usermod -aG docker ubuntu
-	# Workaround bug (for lxc ???)
-	lxc exec ${NODE} -- mkdir -p /etc/systemd/system/docker.service.d
-	#lxc file push -v <(echo -e '[Service]\nMountFlags=shared') ${NODE}/etc/systemd/system/docker.service.d/override.conf
-	lxc file push docker-shared ${NODE}/etc/systemd/system/docker.service.d/override.conf
-	lxc exec ${NODE} -- systemctl enable --now docker
-	lxc exec ${NODE} -- systemctl restart docker.service
+# Create container with ssh installed and key copied
+SSH_TEMPLATE_NAME="${CLUSTER_NAME}-template-ssh"
+function create_ssh_container() {
+	# shellcheck disable=SC2086
+	lxc launch ${LXC_PROFILES} "${LXC_IMAGE}" "${SSH_TEMPLATE_NAME}"
+	lxc exec "${SSH_TEMPLATE_NAME}" -- apt update
+	lxc exec "${SSH_TEMPLATE_NAME}" -- apt install ssh -y 
+	lxc exec "${SSH_TEMPLATE_NAME}" -- mkdir -p /home/ubuntu/.ssh/
+	lxc file push ${SSH_PUBKEY} "${SSH_TEMPLATE_NAME}/home/ubuntu/.ssh/authorized_keys" --mode 0700
+	# make / shared we will need it for kubelet
+	# to test if it worked use:  findmnt  -o TARGET,PROPAGATION /
+	lxc exec "${SSH_TEMPLATE_NAME}" -- dd of=/etc/rc.local <<<$(printf "%s\n%s" '#!/bin/sh -e' "mount --make-rshared /")
+	lxc exec "${SSH_TEMPLATE_NAME}" -- chmod +x /etc/rc.local
+	lxc stop "${SSH_TEMPLATE_NAME}"
+}
 
-	# Print installed version
-	lxc exec ${NODE} -- docker --version
-done
+# Create container with docker
+DOCKER_TEMPLATE_NAME=${CLUSTER_NAME}-1-template-docker
+function create_docker_container() {
+	lxc copy "${SSH_TEMPLATE_NAME}" "${DOCKER_TEMPLATE_NAME}"
+	lxc start "${DOCKER_TEMPLATE_NAME}"
+	lxc exec "${DOCKER_TEMPLATE_NAME}" -- apt update
+	#  open-iscsi is for longhorn https://github.com/kubernetes/minikube/issues/2846
+	lxc exec "${DOCKER_TEMPLATE_NAME}" -- apt install curl open-iscsi -y 
+	lxc exec "${DOCKER_TEMPLATE_NAME}" -- mkdir /etc/docker
+	lxc exec "${DOCKER_TEMPLATE_NAME}" -- dd of=/etc/docker/daemon.json <<<'{ "data-root": "/opt/docker" }'
+	lxc exec "${DOCKER_TEMPLATE_NAME}" -- bash -c 'curl -L get.docker.com | VERSION='${DOCKER_VERSION}' bash'
+	lxc exec "${DOCKER_TEMPLATE_NAME}" -- sudo usermod -aG docker ubuntu
+	lxc exec "${DOCKER_TEMPLATE_NAME}" -- docker info
+	lxc exec "${DOCKER_TEMPLATE_NAME}" -- docker run --rm alpine echo "In ${DOCKER_TEMPLATE_NAME} Docker Works!"
+	lxc exec "${DOCKER_TEMPLATE_NAME}" -- docker rmi alpine 
+	lxc stop "${DOCKER_TEMPLATE_NAME}"
+}
 
-# Print nodes ip addresses
-for NODE in ${NODES}; do
-	lxc exec ${NODE} -- bash -c 'echo -n "$(hostname) " ; ip -4 addr show eth0 | grep -oP "(?<=inet ).*(?=/)"'
-done
-echo "lxc containers installed:"
-sudo lxc ls
+function create_rke_node_containers() {
+	NODES=$(echo rke{1..3})
+	for NODE in ${NODES}; do
+		lxc copy "${DOCKER_TEMPLATE_NAME}" "${NODE}"
+		lxc start "${NODE}"
+	done
+}
 
-echo "adapt your /etc/hosts file somehow like this"
-echo "10.208.85.34 rke1"
-echo "10.208.85.91 rke2"
-echo "10.208.85.4  rke3"
-echo "and run ./deploy-rke.sh"
+function clean_rke_nodes_container() {
+	NODES=$(echo rke{1..3})
+	for NODE in ${NODES}; do
+		lxc stop "${NODE}"
+		lxc delete "${NODE}"
+	done
+}
+
+function populate_etc_hosts() {
+	# Add node ips to /etc/hosts
+	cat /etc/hosts
+	NODES=$(echo rke{1..3})
+	for NODE in ${NODES}; do
+		# shellcheck disable=SC2016
+		node_ip=$(lxc exec "${NODE}" -- bash -c 'printf "%s %s" $(ip -4 addr show eth0 | grep -oP "(?<=inet ).*(?=/)") $(hostname)')
+		sudo sed -i '/[0-9]\+.[0-9]\+.[0-9]\+\.[0-9]\+ '"${NODE}"'/d' /etc/hosts
+		echo "$node_ip" | sudo tee -a /etc/hosts
+	done
+	cat /etc/hosts
+}
+
+# Create rke-server
+# for rancher (or rather k3s as of 6.20.2022) server to work on 22.04
+# you have to disable cgroups2 running:
+# 	echo 'GRUB_CMDLINE_LINUX=systemd.unified_cgroup_hierarchy=false' > /etc/default/grub.d/cgroup.cfg
+# 	update-grub
+RANCHER_SERVER_VERSION="v2.6.4"
+RANCHER_SERVER_PASSWOD="password"
+function create_rke_server() {
+	RKE_SERVER_NAME="rke-server"
+	lxc copy "${DOCKER_TEMPLATE_NAME}" "${RKE_SERVER_NAME}"
+	lxc start "${RKE_SERVER_NAME}"
+	lxc exec "${RKE_SERVER_NAME}" -- bash -c 'while ! docker ps > /dev/null ; do echo "Waiting for docker service to start" ; sleep 1  ; done'
+	lxc exec "${RKE_SERVER_NAME}" -- docker run -d --name rke-server \
+		--restart=unless-stopped \
+		-e CATTLE_BOOTSTRAP_PASSWORD="${RANCHER_SERVER_PASSWOD}" \
+		-p 80:80 -p 443:443 \
+		-v /opt/rancher:/var/lib/rancher \
+		--privileged \
+		rancher/rancher:"${RANCHER_SERVER_VERSION}"
+	lxc exec "${RKE_SERVER_NAME}" -- docker logs rke-server -f
+}
+
+# Rancher/k8s/kubelet fix for https://www.thedroneely.com/posts/kubernetes-in-a-linux-container/
+# from https://gist.github.com/julianlam/07abef272136ea14a627
+# for NODE in ${NODES}; do
+# 	lxc config device add "${NODE}" kmsg-share unix-char path=/dev/kmsg source="/dev/kmsg"
+# done
+
+init_host
+create_ssh_container
+create_docker_container
+create_rke_node_containers
+populate_etc_hosts

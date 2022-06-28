@@ -1,5 +1,5 @@
 config:
-  linux.kernel_modules: overlay,aufs
+  linux.kernel_modules: overlay
   raw.lxc: |-
     lxc.apparmor.profile = unconfined
     lxc.cgroup.devices.allow = a

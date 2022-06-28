@@ -1,26 +1,29 @@
 #!/bin/bash
 
-# rm -fv kube_config_cluster.yml
+K8S_VERSION="v1.24.1"
 
-echo "downloading rke v0.1.18 for k8s 1.13.5"
-# wget https://github.com/rancher/rke/releases/download/v0.1.18/rke_linux-amd64
-wget https://github.com/rancher/rke/releases/download/v1.0.8/rke_linux-amd64
+echo "Downloading kubectl"
+curl -LO "https://storage.googleapis.com/kubernetes-release/release/$K8S_VERSION/bin/linux/amd64/kubectl"
+chmod +x ./kubectl
+sudo mv ./kubectl /usr/local/bin/
+mkdir -p /home/ubuntu/.kube
+mv kube_config_cluster.yml /home/ubuntu/.kube/config
+kubectl get nodes
+echo "are the nodes ready?"
+echo "if you face problems, please open an issue on github"
+
+# rm -fv kube_config_cluster.yml
+RKE_VERSION="v1.3.12"
+
+echo "Downloading rke $RKE_VERSION"
+wget "https://github.com/rancher/rke/releases/download/$RKE_VERSION/rke_linux-amd64"
 mv rke_linux-amd64 rke
 sudo chmod +x rke
 sudo mv rke /usr/local/bin/
 rke --version
 
+# That's why it need retries: https://github.com/rancher/rke/issues/2632
 rke up --config cluster.yml
-
-echo "downloading kubectl"
-curl -LO https://storage.googleapis.com/kubernetes-release/release/v1.17.5/bin/linux/amd64/kubectl
-chmod +x ./kubectl
-sudo mv ./kubectl /usr/local/bin/
-[ -d /home/ubuntu/.kube ] || mkdir /home/ubuntu/.kube
-mv kube_config_cluster.yml /home/ubuntu/.kube/config
-kubectl get nodes
-echo "are the nodes ready?"
-echo "if you face problems, please open an issue on github"
 
 # Upgrade to k8s 1.14.6
 # echo "download rke v0.2.8 for k8s 1.14.6"
